@@ -1,0 +1,147 @@
+---
+title: "Bayesian Power Analysis"
+output: html_notebook
+---
+
+
+```{r warning=FALSE, message=FALSE}
+rm(list = ls())
+library(tidyverse)
+library(brms)
+library(future)
+library(furrr)
+plan(multisession)
+```
+
+
+## Replicate full data structure
+```{r}
+set.seed(123)  # for reproducibility
+
+## This simulates the anticipated data structure from the behavioral studies:
+  ### Participants respond to 6 out of 20 headlines, each with 1 out of 3 moral framings
+  ### Nested structure of ratings in headlines, posts, and users
+  ### Assume a small effect size of 0.2 below alternative drivers of misinformation and past effect sizes for moral language
+  ### Assume interaction and random effects when simulating data
+  ### Assume similar stdev for random effects as in past studies (< 0.5)
+
+# Function to simulate data
+simulate_data_total <- function(){
+  simulate_data_for_user <- function(user_id) { # for each user create a dataframe, then merge all
+    # Randomly select unique headlines
+    user_headlines <- sample(n_headlines, headlines_per_user, replace = FALSE)
+    
+    # For each headline, assign a random post type
+    user_posts <- sample(n_posts_per_headline, headlines_per_user, replace = TRUE)
+  
+    # Create a data frame
+    user_data <- data.frame(user = rep(user_id, headlines_per_user), 
+                            headline = user_headlines, 
+                            post = user_posts)
+  
+    # Simulate other variables
+    # variables will be standardized
+    user_data$x_post_framing <- rnorm(headlines_per_user)
+    user_data$z_jj_mfq_indi <- rnorm(headlines_per_user)
+    user_data$z_jj_mfq_bind <- rnorm(headlines_per_user)
+    user_data$z_jj_mfq_prop <- rnorm(headlines_per_user)
+  
+    return(user_data)
+  }
+  
+  # Generate data for all users (number determined in next code block)
+  all_user_data <- lapply(1:n_users, simulate_data_for_user)
+  simulated_data <- do.call(rbind, all_user_data)
+  simulated_data <- simulated_data %>% mutate(post=post*headline)
+  
+  simulate_z_post_share_index <- function(data){
+    # Fixed effect: interaction term
+    interaction_effect <- effect_size * data$x_post_framing * (data$z_jj_mfq_indi + data$z_jj_mfq_bind + data$z_jj_mfq_prop)
+  
+    # Random effects (normal distributed)
+    # stdev from past experiments
+    random_effect_headline <- rnorm(length(unique(data$headline)), mean = 0, sd = .5)
+    random_effect_user <- rnorm(length(unique(data$user)), mean = 0, sd = .5)
+    random_effect_post <- rnorm(n_headlines*n_posts_per_headline, mean = 0, sd = .5)
+  
+    # Map random effects to each observation
+    data$random_headline <- random_effect_headline[data$headline]
+    data$random_user <- random_effect_user[data$user]
+    data$random_post <- random_effect_post[data$post]
+  
+    # Calculate z_post_share_index (DV)
+    # rnorm(nrow(data)) as error/noise term (makes the estimate more conservative)
+    data$z_post_share_index <- interaction_effect + data$random_headline + data$random_user + data$random_post + rnorm(nrow(data))
+  
+    return(data)
+  }
+  # Apply the function to simulated data
+    simulated_data <- simulate_z_post_share_index(simulated_data)
+    return(simulated_data)
+  
+}
+```
+
+
+## Set parameters and simulate data
+```{r}
+# Adjust to test power for different sample sizes
+n_users <- 500
+
+# Assumed effect size (beta)
+effect_size <- 0.1
+
+# fixed structure based on experimental design
+n_headlines <- 20
+n_posts_per_headline <- 3
+headlines_per_user <- 6
+
+# increase for more precise estimate (significantly increases run-time)
+num_simulations <- 100
+
+simulated_datasets_full <- replicate(num_simulations, simulate_data_total(), simplify = FALSE)
+```
+
+
+## Fit models
+```{r message=FALSE}
+future.seed = TRUE
+
+# Function to fit model and extract 95% credible interval
+extract_ci_full <- function(data) {
+ # main model for study 1 and 2 (see pre-registrations)
+  # This model determines the effect of moral alignment on sharing, given the hierarchical nature of the data
+   model <- brm(
+    z_post_share_index ~ 1 + x_post_framing * (z_jj_mfq_indi + z_jj_mfq_bind + z_jj_mfq_prop) + (x_post_framing * (z_jj_mfq_indi + z_jj_mfq_bind + z_jj_mfq_prop)|headline) + (1|user) + (1|post),
+    data = data,
+    chains = 8,
+    iter = 1000,
+    warmup = 500,
+    seed = 123,
+    control = list(adapt_delta = 0.95)
+  )
+
+  ci <- posterior_interval(model, prob = 0.95)["b_x_post_framing:z_jj_mfq_indi",]
+  return(data.frame(lower = ci[1], upper = ci[2]))
+}
+
+# Extract CIs from each model
+ci_dataframes <- future_map(simulated_datasets_full, extract_ci_full)
+combined_ci_df <- bind_rows(ci_dataframes)
+```
+
+
+## Calculate Power
+```{r}
+# Check if zero is not included in the 95% CI
+zero_not_included <- apply(combined_ci_df, 1, function(ci) ci['lower'] > 0 | ci['upper'] < 0)
+
+# Calculate the proportion
+power_estimate <- mean(zero_not_included)
+
+print(power_estimate) 
+```
+
+
+
+

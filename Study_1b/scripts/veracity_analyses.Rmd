@@ -1,0 +1,531 @@
+---
+title: "Additional Analyses (Veracity) - Study 1b"
+output: html_notebook: default
+
+---
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(future)
+library(numform)
+library(tidybayes)
+
+rm(list = ls())
+
+# Options
+options(
+  mc.cores = parallel::detectCores(),
+  brms.backend = "cmdstanr",
+  future.globals.maxSize = 2147483648
+)
+```
+
+
+## Data
+```{r}
+# Load data
+dl <- read_rds("../data/dl.rds")
+
+# Calculate Post: Share Index
+dl <- dl %>% mutate(
+  post_share_index = (post_share_public + post_like_public + post_share_private + post_share_offline)/4,
+)
+
+# Calculate Individualizing/Binding scores
+dl <- dl %>% mutate(
+  mfq_indi = (mfq_care + mfq_equa)/2,
+  mfq_bind = (mfq_loya + mfq_auth + mfq_puri)/3
+)
+
+# Drop missing data
+dl <- dl %>% drop_na(-headline_rating_true, -source_text)
+
+# Assign new indices
+dl <- dl %>% mutate(across(c(ii, kk, kk), ~as.integer(factor(.))))
+
+
+# Standardize -------------------------------------------------------------
+
+# Create data set for analyses
+df <- dl %>% select(ii, jj, kk)
+
+# Standardize person-level variables
+df <- dl %>% 
+  select(jj, starts_with("mfq_"), conservatism) %>% 
+  distinct() %>% 
+  mutate(
+    across(-jj, list(z_jj = ~(. - mean(.))/sd(.)), .names = "{.fn}_{.col}")
+  ) %>% 
+  rename_with(~paste0("x_jj_", .), c(-jj, -starts_with("z_"))) %>% 
+  left_join(df, ., by = "jj")
+
+# Standardize headline-level variables
+df <- dl %>% 
+  select(kk, starts_with("headline_"), -headline_text) %>% 
+  group_by(kk) %>% 
+  dplyr::summarize(
+    across(everything(), mean)
+  ) %>% 
+  mutate(
+    across(-kk, list(z_kk = ~(. - mean(.))/sd(.)), .names = "{.fn}_{.col}")
+  ) %>% 
+  rename_with(~paste0("x_kk_", .), c(-kk, -starts_with("z_"))) %>% 
+  left_join(df, ., by = "kk")
+  
+# Standardize post-level variables
+df <- dl %>% 
+  dplyr::select(
+    ii, starts_with("post_"), 
+    -post_sentiment, -post_framing, -post_text,
+    -matches("share|like")
+  ) %>% 
+  group_by(ii) %>% 
+  dplyr::summarize(
+    across(everything(), mean)
+  ) %>% 
+  mutate(
+    across(-ii, list(z_ii = ~(. - mean(.))/sd(.)), .names = "{.fn}_{.col}")
+  ) %>% 
+  rename_with(~paste0("x_ii_", .), c(-ii, -starts_with("z_"))) %>% 
+  left_join(df, ., by = "ii")
+
+# Standardize headline-/person-level variables
+df <- dl %>% 
+  select(ii, jj, kk, starts_with("headline_"), -headline_true, -headline_text) %>% 
+  left_join(
+    df %>% select(ii, jj, kk, starts_with("x_kk_")),
+    by = c("ii", "jj", "kk")
+  ) %>%
+  mutate(
+    z_headline_believable = headline_believable - x_kk_headline_believable,   
+    z_headline_controversial = headline_controversial - x_kk_headline_controversial,   
+    z_headline_surprising = headline_surprising - x_kk_headline_surprising,
+    z_headline_interesting = headline_interesting - x_kk_headline_interesting, 
+    z_headline_positive = headline_positive - x_kk_headline_positive
+  ) %>% 
+  mutate(
+    across(starts_with("z_"), ~./sd(.))
+  ) %>% 
+  select(-starts_with("x_kk_")) %>% 
+  rename_with(~paste0("x_", .), c(-ii, -jj, -kk, -starts_with("z_"))) %>% 
+  left_join(df, ., by = c("ii", "jj", "kk"))
+
+# Standardize post-/person-level variables
+df <- dl %>% 
+  select(
+    ii, jj, kk,
+    starts_with("post_"), 
+    -post_sentiment, -post_framing, -post_text,
+    -matches("share|like")
+  ) %>% 
+  left_join(
+    df %>% select(ii, jj, kk, starts_with("x_ii_")),
+    by = c("ii", "jj", "kk")
+  ) %>%
+  mutate(
+    z_post_controversial = post_controversial - x_ii_post_controversial,
+    z_post_surprising = post_surprising - x_ii_post_surprising,
+    z_post_interesting = post_interesting - x_ii_post_interesting,
+    z_post_positive = post_positive - x_ii_post_positive,
+    z_post_agree = post_agree - x_ii_post_agree,
+    z_post_align = post_align - x_ii_post_align
+  ) %>% 
+  mutate(
+    across(starts_with("z_"), ~./sd(.))
+  ) %>% 
+  select(-starts_with("x_ii_")) %>% 
+  rename_with(~paste0("x_", .), c(-ii, -jj, -kk, -starts_with("z_"))) %>% 
+  left_join(df, ., by = c("ii", "jj", "kk"))
+
+# Contrast code categorical predictor variables
+dl <- dl %>% 
+  mutate(
+    post_framing = factor(
+      post_framing, 
+      levels = c("individualizing", "binding", "nonmoral")
+    )
+  )
+contrasts(dl$post_framing) <- contr.sum(3)
+df <- left_join(
+  df, 
+  dl %>% select(ii, x_post_framing = post_framing) %>% distinct(), 
+  by = "ii"
+)
+
+# Standardize outcome variable
+df <- dl %>% 
+  transmute(
+    ii, jj, kk, 
+    y_post_share_index = post_share_index,
+    z_post_share_index = (post_share_index - mean(post_share_index))/sd(post_share_index),
+  ) %>% 
+  left_join(df, by = c("ii", "jj", "kk"))
+```
+
+
+## Fit Models
+```{r}
+## "Full" Models: M1 and M2 with added moral alignment
+# Model 1 (Headline-Level Predictors)
+m1_fit_full <- brm(
+ z_post_share_index ~ 1 + z_kk_headline_believable + z_kk_headline_controversial + z_kk_headline_surprising + z_kk_headline_interesting + z_kk_headline_positive + z_kk_headline_true + z_headline_believable + z_headline_controversial + z_headline_surprising + z_headline_interesting + z_headline_positive + x_post_framing*(z_jj_mfq_indi+z_jj_mfq_bind+z_jj_mfq_prop) + (1|ii) + (1|jj) + (1 + z_headline_believable + z_headline_controversial + z_headline_surprising + z_headline_interesting + z_headline_positive + x_post_framing*(z_jj_mfq_indi+z_jj_mfq_bind+z_jj_mfq_prop)|kk),
+ data = df,
+ chains = 8,
+ iter = 1000,
+warmup = 750,
+seed = 9103465
+)
+
+# Model 2 (Post-Level Predictors)
+ m2_fit_full <- brm(
+   z_post_share_index ~ 1 + z_ii_post_controversial + z_ii_post_surprising + z_ii_post_interesting + z_ii_post_positive + z_post_controversial + z_post_surprising + z_post_interesting + z_post_positive +  x_post_framing*(z_jj_mfq_indi+z_jj_mfq_bind+z_jj_mfq_prop) + (1 + z_post_controversial + z_post_surprising + z_post_interesting + z_post_positive|ii) + (1|jj) + (1 + x_post_framing*(z_jj_mfq_indi+z_jj_mfq_bind+z_jj_mfq_prop)|kk),
+   data = df,
+   chains = 8,
+   iter = 1000,
+   warmup = 750,
+   seed = 3000256
+ )
+
+
+## Add veracity interactions to model M6
+m6_fit_ver <- brm(
+  z_post_share_index ~ 1 + z_kk_headline_true*x_post_framing*(z_jj_mfq_indi+z_jj_mfq_bind+z_jj_mfq_prop) + (1|jj) + (1 + x_post_framing*(z_jj_mfq_indi + z_jj_mfq_bind + z_jj_mfq_prop)|kk),
+  data = df,
+  chains = 8,
+  iter = 1500,
+  warmup = 750,
+  seed = 4962216,
+  adapt_delta = 0.999
+)
+
+write_rds(m1_fit_full, "../results/m1_fit_full.rds")
+write_rds(m2_fit_full, "../results/m2_fit_full.rds")
+write_rds(m6_fit_ver, "../results/m6_fit_ver.rds")
+```
+
+
+## CV
+```{r}
+# Assign folds for 10-fold cross-validation
+set.seed(9735121)
+df <- df %>% 
+  distinct(jj) %>% 
+  mutate(fold = sample.int(10, n(), replace = TRUE)) %>% 
+  left_join(df, ., by = c("jj"))
+
+# Run 10-fold cross-validation
+plan(multisession)
+m1_fit_full <- add_criterion(
+ m1_fit_full,
+ criterion = "kfold",
+ chains = 1,
+ folds = df$fold
+)
+
+m2_fit_full <- add_criterion(
+ m2_fit_full,
+ criterion = "kfold",
+ chains = 1,
+ folds = df$fold
+)
+
+m6_fit_ver <- add_criterion(
+  m6_fit_ver,
+  criterion = "kfold",
+  chains = 1,
+  folds = df$fold
+)
+
+plan("default")
+
+# Calculate Bayesian R2
+m1_fit_full <- add_criterion(
+ m1_fit_full,
+ criterion = "bayes_R2",
+ re_formula = NA
+)
+
+m2_fit_full <- add_criterion(
+ m2_fit_full,
+ criterion = "bayes_R2",
+ re_formula = NA
+)
+
+m6_fit_ver <- add_criterion(
+  m6_fit_ver, 
+  criterion = "bayes_R2",
+  re_formula = NA
+)
+
+
+# Export ------------------------------------------------------------------
+  
+  # Save results as .rds
+write_rds(m1_fit_full, "../results/m1_fit_full.rds")
+write_rds(m2_fit_full, "../results/m2_fit_full.rds")
+write_rds(m6_fit_ver, "../results/m6_fit_ver.rds")
+```
+
+
+## Load Models
+```{r}
+m1_fit_full <- readRDS("../results/m1_fit_full.rds")
+m2_fit_full <- readRDS("../results/m2_fit_full.rds")
+m6_fit_ver <- readRDS("../results/m6_fit_ver.rds")
+```
+
+
+## R2 Overview
+```{r}
+m1_fit <- readRDS("../results/m1_fit.rds")
+m2_fit <- readRDS("../results/m2_fit.rds")
+
+print("M1-Headline: Original vs Veracity interaction")
+print(bayes_R2(m1_fit))
+print(bayes_R2(m1_fit_full))
+print(noquote(""))
+
+print("M2-Post: Original vs Veracity interaction")
+print(bayes_R2(m2_fit))
+print(bayes_R2(m2_fit_full))
+print(noquote(""))
+```
+
+
+### Model comparisons: Original vs veracity interaction
+```{r}
+results <- crossing(
+    model0 = paste0("M", 1:1),
+    model1 = paste0("M", 1:1)
+  ) %>% 
+    mutate(
+      fit0 = map(model0, ~read_rds(paste0("../results/", str_to_lower(.), "_fit.rds"))),
+      fit1 = map(model1, ~read_rds(paste0("../results/", str_to_lower(.), "_fit_full.rds")))
+    )
+
+results <- results %>% 
+  mutate(
+    ELPD = map2(
+      fit0, 
+      fit1, 
+      ~loo_compare(.x, .y, criterion = "kfold") %>% 
+        as.data.frame() %>%
+        rownames_to_column("model")
+    )
+  ) %>% 
+  unnest(ELPD) %>% 
+  group_by(model0, model1) %>% 
+  dplyr::summarize(
+    elpd_diff = elpd_diff[model == ".x"] - elpd_diff[model == ".y"],
+    elpd_se_diff = max(se_diff)
+  ) %>% 
+  ungroup() %>% 
+  left_join(
+    results %>% 
+      mutate(
+        R2 = map(
+          fit0, 
+          ~bayes_R2(., robust = T) %>% as_tibble()
+        )
+      ) %>% 
+      unnest(R2) %>% 
+      transmute(
+        model0,
+        r2 = Estimate,
+        r2_l95 = Q2.5,
+        r2_u95 = Q97.5
+      ) %>% 
+      distinct(),
+    by = "model0"
+  )
+
+#combine comparisons
+results_comparison <- results %>% mutate(z = elpd_diff / elpd_se_diff)
+print(results_comparison)
+
+#save results
+write_rds(results_comparison, "../results/comparison_main_with_headline.rds")
+
+
+results <- crossing(
+    model0 = paste0("M", 2:2),
+    model1 = paste0("M", 2:2)
+  ) %>% 
+    mutate(
+      fit0 = map(model0, ~read_rds(paste0("../results/", str_to_lower(.), "_fit.rds"))),
+      fit1 = map(model1, ~read_rds(paste0("../results/", str_to_lower(.), "_fit_full.rds")))
+    )
+
+results <- results %>% 
+  mutate(
+    ELPD = map2(
+      fit0, 
+      fit1, 
+      ~loo_compare(.x, .y, criterion = "kfold") %>% 
+        as.data.frame() %>%
+        rownames_to_column("model")
+    )
+  ) %>% 
+  unnest(ELPD) %>% 
+  group_by(model0, model1) %>% 
+  dplyr::summarize(
+    elpd_diff = elpd_diff[model == ".x"] - elpd_diff[model == ".y"],
+    elpd_se_diff = max(se_diff)
+  ) %>% 
+  ungroup() %>% 
+  left_join(
+    results %>% 
+      mutate(
+        R2 = map(
+          fit0, 
+          ~bayes_R2(., robust = T) %>% as_tibble()
+        )
+      ) %>% 
+      unnest(R2) %>% 
+      transmute(
+        model0,
+        r2 = Estimate,
+        r2_l95 = Q2.5,
+        r2_u95 = Q97.5
+      ) %>% 
+      distinct(),
+    by = "model0"
+  )
+
+#combine comparisons
+results_comparison <- results %>% mutate(z = elpd_diff / elpd_se_diff)
+#save results
+write_rds(results_comparison, "../results/comparison_main_with_post.rds")
+
+print(results_comparison)
+```
+
+
+## Effect size summary of main model with veracity interactions
+```{r}
+m6_results <- m6_fit_ver %>% 
+    spread_draws(
+      b_z_jj_mfq_indi,
+      b_z_jj_mfq_bind,
+      b_z_jj_mfq_prop,
+      `b_x_post_framing1:z_jj_mfq_indi`,
+      `b_x_post_framing2:z_jj_mfq_indi`,
+      `b_x_post_framing1:z_jj_mfq_bind`,
+      `b_x_post_framing2:z_jj_mfq_bind`,
+      `b_x_post_framing1:z_jj_mfq_prop`,
+      `b_x_post_framing2:z_jj_mfq_prop`,
+      `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_indi`,
+      `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_indi`,
+      `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_bind`,
+      `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_bind`,
+      `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_prop`,
+      `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_prop`,
+    ) %>% 
+    transmute(
+      .chain, .iteration, .draw,
+      b_indi_indi = b_z_jj_mfq_indi + 1 * `b_x_post_framing1:z_jj_mfq_indi`,
+      b_indi_bind = b_z_jj_mfq_indi + 1 * `b_x_post_framing2:z_jj_mfq_indi`,
+      b_indi_nonm = b_z_jj_mfq_indi + -1 * `b_x_post_framing1:z_jj_mfq_indi` + -1 * `b_x_post_framing2:z_jj_mfq_indi`,
+      b_bind_indi = b_z_jj_mfq_bind + 1 * `b_x_post_framing1:z_jj_mfq_bind`,
+      b_bind_bind = b_z_jj_mfq_bind + 1 * `b_x_post_framing2:z_jj_mfq_bind`,
+      b_bind_nonm = b_z_jj_mfq_bind + -1 * `b_x_post_framing1:z_jj_mfq_bind` + -1 * `b_x_post_framing2:z_jj_mfq_bind`,
+      b_prop_indi = b_z_jj_mfq_prop + 1 * `b_x_post_framing1:z_jj_mfq_prop`,
+      b_prop_bind = b_z_jj_mfq_prop + 1 * `b_x_post_framing2:z_jj_mfq_prop`,
+      b_prop_nonm = b_z_jj_mfq_prop + -1 * `b_x_post_framing1:z_jj_mfq_prop` + -1 * `b_x_post_framing2:z_jj_mfq_prop`,
+      d_indi_indi_bind = b_indi_indi - b_indi_bind,
+      d_indi_indi_nonm = b_indi_indi - b_indi_nonm,
+      d_indi_bind_nonm = b_indi_bind - b_indi_nonm,
+      d_bind_bind_indi = b_bind_bind - b_bind_indi,
+      d_bind_bind_nonm = b_bind_bind - b_bind_nonm,
+      d_bind_ind_nonm = b_bind_indi - b_bind_nonm,
+      
+      b_indi_indi_true = b_z_jj_mfq_indi + 1 * (`b_x_post_framing1:z_jj_mfq_indi` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_indi`),
+      b_indi_bind_true = b_z_jj_mfq_indi + 1 * (`b_x_post_framing2:z_jj_mfq_indi` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_indi`),
+      b_indi_nonm_true = b_z_jj_mfq_indi + -1 * (`b_x_post_framing1:z_jj_mfq_indi` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_indi`) + -1 * (`b_x_post_framing2:z_jj_mfq_indi` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_indi`),
+      b_bind_indi_true = b_z_jj_mfq_bind + 1 * (`b_x_post_framing1:z_jj_mfq_bind` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_bind`),
+      b_bind_bind_true = b_z_jj_mfq_bind + 1 * (`b_x_post_framing2:z_jj_mfq_bind` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_bind`),
+      b_bind_nonm_true = b_z_jj_mfq_bind + -1 * (`b_x_post_framing1:z_jj_mfq_bind` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_bind`) + -1 * (`b_x_post_framing2:z_jj_mfq_bind` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_bind`),
+      b_prop_indi_true = b_z_jj_mfq_prop + 1 * (`b_x_post_framing1:z_jj_mfq_prop` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_prop`),
+      b_prop_bind_true = b_z_jj_mfq_prop + 1 * (`b_x_post_framing2:z_jj_mfq_prop` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_prop`),
+      b_prop_nonm_true = b_z_jj_mfq_prop + -1 * (`b_x_post_framing1:z_jj_mfq_prop` + `b_z_kk_headline_true:x_post_framing1:z_jj_mfq_prop`) + -1 * (`b_x_post_framing2:z_jj_mfq_prop` + `b_z_kk_headline_true:x_post_framing2:z_jj_mfq_prop`),
+      d_indi_indi_bind_true = b_indi_indi_true - b_indi_bind_true,
+      d_indi_indi_nonm_true = b_indi_indi_true - b_indi_nonm_true,
+      d_indi_bind_nonm_true = b_indi_bind_true - b_indi_nonm_true,
+      d_bind_bind_indi_true = b_bind_bind_true - b_bind_indi_true,
+      d_bind_bind_nonm_true = b_bind_bind_true - b_bind_nonm_true,
+      d_bind_ind_nonm_true = b_bind_indi_true - b_bind_nonm_true,
+      
+      # d_indi_indi_bind_true_false = d_indi_indi_bind - d_indi_indi_bind_true,
+      # d_indi_indi_nonm_true_false = d_indi_indi_nonm - d_indi_indi_nonm_true,
+      # d_indi_bind_nonm_true_false = d_indi_bind_nonm - d_indi_bind_nonm_true,
+      # d_bind_bind_indi_true_false = d_bind_bind_indi - d_bind_bind_indi_true,
+      # d_bind_bind_nonm_true_false = d_bind_bind_nonm - d_bind_bind_nonm_true,
+      # d_bind_ind_nonm_true_false = d_bind_ind_nonm - d_bind_ind_nonm_true,
+    ) %>% dplyr::select(starts_with("d_"), .chain, .iteration, .draw) %>%
+    pivot_longer(c(-.chain, -.iteration, -.draw)) %>% 
+    group_by(name) %>% 
+    median_qi(value) %>% 
+    mutate(across(where(is.numeric), numform::f_num, digits = 2, retain.leading.zero = T))
+
+print(m6_results)
+#save results
+write_rds(m6_results, "../results/m6_effects_ver.rds")
+```
+
+
+```{r}
+m1_full_results <- m1_fit_full %>% 
+    spread_draws(
+      b_z_jj_mfq_indi,
+      b_z_jj_mfq_bind,
+      b_z_jj_mfq_prop,
+      `b_x_post_framing1:z_jj_mfq_indi`,
+      `b_x_post_framing2:z_jj_mfq_indi`,
+      `b_x_post_framing1:z_jj_mfq_bind`,
+      `b_x_post_framing2:z_jj_mfq_bind`,
+      `b_x_post_framing1:z_jj_mfq_prop`,
+      `b_x_post_framing2:z_jj_mfq_prop`,
+    ) %>% 
+    transmute(
+      .chain, .iteration, .draw,
+      b_indi_indi = b_z_jj_mfq_indi + 1 * `b_x_post_framing1:z_jj_mfq_indi`,
+      b_indi_bind = b_z_jj_mfq_indi + 1 * `b_x_post_framing2:z_jj_mfq_indi`,
+      b_indi_nonm = b_z_jj_mfq_indi + -1 * `b_x_post_framing1:z_jj_mfq_indi` + -1 * `b_x_post_framing2:z_jj_mfq_indi`,
+      b_bind_indi = b_z_jj_mfq_bind + 1 * `b_x_post_framing1:z_jj_mfq_bind`,
+      b_bind_bind = b_z_jj_mfq_bind + 1 * `b_x_post_framing2:z_jj_mfq_bind`,
+      b_bind_nonm = b_z_jj_mfq_bind + -1 * `b_x_post_framing1:z_jj_mfq_bind` + -1 * `b_x_post_framing2:z_jj_mfq_bind`,
+      b_prop_indi = b_z_jj_mfq_prop + 1 * `b_x_post_framing1:z_jj_mfq_prop`,
+      b_prop_bind = b_z_jj_mfq_prop + 1 * `b_x_post_framing2:z_jj_mfq_prop`,
+      b_prop_nonm = b_z_jj_mfq_prop + -1 * `b_x_post_framing1:z_jj_mfq_prop` + -1 * `b_x_post_framing2:z_jj_mfq_prop`,
+      d_indi_indi_bind = b_indi_indi - b_indi_bind,
+      d_indi_indi_nonm = b_indi_indi - b_indi_nonm,
+      d_indi_bind_nonm = b_indi_bind - b_indi_nonm,
+      d_bind_bind_indi = b_bind_bind - b_bind_indi,
+      d_bind_bind_nonm = b_bind_bind - b_bind_nonm,
+      d_bind_ind_nonm = b_bind_indi - b_bind_nonm,
+      
+    ) %>% #dplyr::select(starts_with("d_"), .chain, .iteration, .draw) %>%
+    pivot_longer(c(-.chain, -.iteration, -.draw)) %>% 
+    group_by(name) %>% 
+    median_qi(value) %>% 
+    mutate(across(where(is.numeric), numform::f_num, digits = 2, retain.leading.zero = T))
+
+print(m1_full_results)
+#save results
+write_rds(m1_full_results, "../results/m1_effects_full.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
