@@ -214,4 +214,4 @@ rm(list = ls())
     group_by(.condition, .path) %>% 
     median_qi(.value) %>% 
     mutate(across(where(is.double), round, 2))
-    write_rds(draws, "../results/results_mediation.rds")
+    write_rds(draws, "../results/mediation_effects.rds")

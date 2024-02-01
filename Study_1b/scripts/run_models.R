@@ -424,7 +424,7 @@ rm(list = ls())
   results_comparison <- results %>% mutate(z = elpd_diff / elpd_se_diff)
     
   # Save results as .rds
-  write_rds(results_comparison, "../results/results_comparison.rds")
+  write_rds(results_comparison, "../results/comparison.rds")
   
 ############ Summarize main model results
   

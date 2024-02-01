@@ -1,0 +1,68 @@
+---
+title: "msinformation exposure"
+output: html_notebook
+---
+
+```{r warning=FALSE, message=FALSE}
+library(misinfo.exposure)
+library(tidyverse)
+library(httr)
+library(rtweet)
+devtools::install_github("mmosleh/minfo-exposure")
+```
+
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+df_anti <- read_csv("../data/stance/antivax_stance_tweets.csv")
+df_pro <- read_csv("../data/stance/provax_stance_tweets.csv")
+
+twitter_ids = unique(c(df_anti$user_id, df_pro$user_id))
+```
+
+
+```{r}
+screen_names <- twitter_ids
+scores <- data.frame(id = screen_names, partisan_score = numeric(length(screen_names)), 
+                     misinfo_score = numeric(length(screen_names)),
+                     misinfo_score_weighted = numeric(length(screen_names)), stringsAsFactors = FALSE)
+request_interval <- 3600 / 1000
+
+for (i in seq_along(screen_names)) {
+  
+  url <- paste("https://mescalc.p.rapidapi.com/account/",tolower(screen_names[i]),sep='')
+  response <- VERB("GET", url, add_headers('X-RapidAPI-Host' = 'mescalc.p.rapidapi.com', 
+                                           'X-RapidAPI-Key' = 'f33b4455b3msh361e7183847fd7dp154b42jsn8177b9d8e91b'), content_type("application/octet-stream"))
+  output = content(response, "parsed")
+  
+   if (!is.null(output$message) && grepl("Cannot find information about", output$message)) {
+    scores$partisan_score[i] <- NA
+    scores$misinfo_score[i] <- NA
+    scores$misinfo_score_weighted[i] <- NA
+  } else {
+    if (!is.null(output$partisan_score)){
+      scores$partisan_score[i] <- output$partisan_score
+    }
+    else{
+      scores$partisan_score[i] <- NA
+    }
+    if (!is.null(output$misinfo_exposure_score)){
+      scores$misinfo_score[i] <- output$misinfo_exposure_score
+      scores$misinfo_score_weighted[i] <- output$misinfo_exposure_score_weighted_numtweets
+    }
+    else{
+      scores$misinfo_score[i] <- NA
+      scores$misinfo_score_weighted[i] <- NA
+    }
+  }
+  Sys.sleep(request_interval)
+}
+
+# print(scores)
+
+# sum(is.na(scores$partisan_score))/nrow(scores)
+
+write.csv(scores, file = "../data/political_ideology_misinfo.csv", row.names = FALSE)
+```
+
+
