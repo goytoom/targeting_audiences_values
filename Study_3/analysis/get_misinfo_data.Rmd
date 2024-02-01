@@ -31,8 +31,9 @@ request_interval <- 3600 / 1000
 for (i in seq_along(screen_names)) {
   
   url <- paste("https://mescalc.p.rapidapi.com/account/",tolower(screen_names[i]),sep='')
-  response <- VERB("GET", url, add_headers('X-RapidAPI-Host' = 'mescalc.p.rapidapi.com', 
-                                           'X-RapidAPI-Key' = 'f33b4455b3msh361e7183847fd7dp154b42jsn8177b9d8e91b'), content_type("application/octet-stream"))
+  response <- VERB("GET", url, add_headers('X-RapidAPI-Host' = '', ## Add your hostname and key here
+                                           'X-RapidAPI-Key' = ''), ##
+                   content_type("application/octet-stream"))
   output = content(response, "parsed")
   
    if (!is.null(output$message) && grepl("Cannot find information about", output$message)) {
