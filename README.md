@@ -53,3 +53,7 @@ This is the repository for the paper Targeting Audiences Moral Values via Moral 
 - `data/stance/`: output of stance detection. hydrated tweets with stance (pro/antivax) annotations
 - `data/political_ideology_misinfo.csv`: Political ideology and exposure to misinformation for users in the dataset
 - `data/mftc_cleaned.csv`: annotated training data (MFTC)
+
+# Additional Notes
+Robustness checks for Study 3 (all data and code) can be found in the project's OSF repository due to the size of the files:
+https://osf.io/z25tc/
