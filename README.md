@@ -11,7 +11,7 @@ This is the repository for the paper Targeting Audiences Moral Values via Moral 
 - `scripts/run_models.R`: fits statistical models with cleaned data
 - `scripts/run_model_mediation.R`: fits mediation models
 - `scripts/results_summary.R`: summarizes model outputs. Creates easy to read tables.
-- `scripts/power_analysis.Rmd`: power analysis to whether sample size is sufficient
+- `scripts/power_analysis.Rmd`: power analysis for sample size
 - `scripts/public_sharing_analyses.Rmd`: repeats main analyses for public vs private sharing intentions
 - `scripts/veracity_analyses.Rmd`: analyzes the effects of moral alignment for true vs misinformation
 
